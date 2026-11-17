@@ -2,7 +2,6 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
 import type { Config, Info, JiraBrief, JiraIssue, Limit, TaskState } from '../types'
-import { BSN_LOGO_PNG } from './logo'
 
 const PANE = 'uso-monitor'
 const TITLE = 'Uso'
@@ -13,9 +12,19 @@ const STORE_JIRA_SITE = 'jira-site'
 const STORE_JIRA_PINS = 'jira-pins'
 const ATLASSIAN = 'plugin:atlassian:atlassian'
 const JIRA_TTL_MS = 10 * 60_000
-/** BSN lime, for the logo's text stand-in. */
-const BSN_LIME = '#D0D600'
-const LOGO_COLS = 10
+/** BSN lime. */
+export const BSN_LIME = '#D0D600'
+/**
+ * The BSN logo drawn in half blocks, like the usage bars: works in any terminal.
+ * B with the notch on the right, S in two hooks, N with its diagonal; 6 pixels tall.
+ */
+export const LOGO_ART = [
+  '█▀▀▀▀▀█  ▄█▀▀▀▀▀  █▀█   █',
+  '█▀▀▀▀▀▄   ▀   ▄   █  ▀▄ █',
+  '█▄▄▄▄▄█  ▄▄▄▄▄█▀  █    ▀█',
+] as const
+const LOGO_COLS = [...LOGO_ART[0]].length
+const LOGO_GAP = 2
 const ALERT_AT = [80, 90]
 
 // Change a tag when the stored value's fields change: an older value is then declined.
@@ -813,14 +822,14 @@ export const register: Register = on => {
 
   // Under the prompt: the engine's hint line, then the colored lines.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    const els = $.ui.resolve(e)
-    const { Box, Text } = els
+    const { Box, Text } = $.ui.resolve(e)
     const d = await statusData($)
     const hint = await next(e)
-    const withLogo = d.config.logo
     const cols = e.viewport?.columns
+    // The logo only where it leaves room for the lines.
+    const withLogo = d.config.logo && (cols === undefined || cols >= LOGO_COLS + LOGO_GAP + 60)
     const lines = statusSegs(d, {
-      columns: cols === undefined ? undefined : withLogo ? cols - LOGO_COLS - 2 : cols,
+      columns: cols === undefined ? undefined : withLogo ? cols - LOGO_COLS - LOGO_GAP : cols,
       isDraft: e.props.isDraft,
     })
     const body = (
@@ -834,18 +843,22 @@ export const register: Register = on => {
         ))}
       </Box>
     )
-    // The picture only where the surface draws images (the terminal); elsewhere, "BSN" in lime.
-    const Image = 'Image' in els ? els.Image : undefined
-    const logo = Image ? (
-      <Image key="bsn-logo" source={{ png: BSN_LOGO_PNG }} columns={LOGO_COLS} rows={1} alt="BSN" />
-    ) : (
-      <Text color={BSN_LIME} weight="bold">BSN</Text>
-    )
+    // Beside the full lines, the drawn logo; beside the one compact line, "BSN".
+    const logo =
+      lines.length > 1 ? (
+        <Box flexDirection="column">
+          {LOGO_ART.map(row => (
+            <Text color={BSN_LIME} wrap="truncate-end">{row}</Text>
+          ))}
+        </Box>
+      ) : (
+        <Text color={BSN_LIME} weight="bold">BSN</Text>
+      )
     return (
       <Box flexDirection="column">
         {hint}
         {withLogo ? (
-          <Box flexDirection="row" gap={2}>
+          <Box flexDirection="row" gap={LOGO_GAP}>
             {logo}
             {body}
           </Box>

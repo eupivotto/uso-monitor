@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { StatusData } from '../hooks/register'
-import { age, BLUE, citedKey, countdown, DEFAULT_CONFIG, duration, jiraKeyFromBranch, nextAlert, pace, parseJiraKey, pickMine, resetLabel, statusText } from '../hooks/register'
+import { age, BLUE, BSN_LIME, citedKey, countdown, DEFAULT_CONFIG, duration, jiraKeyFromBranch, nextAlert, pace, parseJiraKey, pickMine, resetLabel, statusText } from '../hooks/register'
 
 const PANE = {
   plugin: 'uso-monitor',
@@ -177,9 +177,8 @@ test('under the prompt: blue text, bars colored by state, engine hint kept', asy
   expect(colorOf('medium')).toBe(BLUE.value)
   expect(colorOf(' 42%')).toBe('#4CC38A')
   expect(colorOf(' 95%')).toBe('#EF5F5F')
-  const logo = await ui.findAll({ type: 'Image' })
-  expect(logo.length).toBe(1)
-  expect(logo[0]?.props.alt).toBe('BSN')
+  expect(colorOf('█▀▀▀▀▀█  ▄█▀▀▀▀▀  █▀█   █')).toBe(BSN_LIME)
+  expect(colorOf('█▄▄▄▄▄█  ▄▄▄▄▄█▀  █    ▀█')).toBe(BSN_LIME)
   await ui.unmount()
 })
 
