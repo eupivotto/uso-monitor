@@ -177,8 +177,8 @@ test('under the prompt: blue text, bars colored by state, engine hint kept', asy
   expect(colorOf('medium')).toBe(BLUE.value)
   expect(colorOf(' 42%')).toBe('#4CC38A')
   expect(colorOf(' 95%')).toBe('#EF5F5F')
-  expect(colorOf('█▀▀▀▀▀█  ▄█▀▀▀▀▀  █▀█   █')).toBe(BSN_LIME)
-  expect(colorOf('█▄▄▄▄▄█  ▄▄▄▄▄█▀  █    ▀█')).toBe(BSN_LIME)
+  expect(colorOf('█▀▀▀█ ▄█▀▀▀ █▀▄ █')).toBe(BSN_LIME)
+  expect(colorOf('█▄▄▄█ ▄▄▄█▀ █  ▀█')).toBe(BSN_LIME)
   await ui.unmount()
 })
 

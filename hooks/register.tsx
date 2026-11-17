@@ -19,9 +19,9 @@ export const BSN_LIME = '#D0D600'
  * B with the notch on the right, S in two hooks, N with its diagonal; 6 pixels tall.
  */
 export const LOGO_ART = [
-  '█▀▀▀▀▀█  ▄█▀▀▀▀▀  █▀█   █',
-  '█▀▀▀▀▀▄   ▀   ▄   █  ▀▄ █',
-  '█▄▄▄▄▄█  ▄▄▄▄▄█▀  █    ▀█',
+  '█▀▀▀█ ▄█▀▀▀ █▀▄ █',
+  '█▀▀▀▄  ▀ ▄  █ ▀▄█',
+  '█▄▄▄█ ▄▄▄█▀ █  ▀█',
 ] as const
 const LOGO_COLS = [...LOGO_ART[0]].length
 const LOGO_GAP = 2
