@@ -1,0 +1,5 @@
+{
+  "name": "uso-monitor",
+  "owner": { "name": "eupivotto" },
+  "plugins": [{ "name": "uso-monitor", "source": "./" }]
+}
