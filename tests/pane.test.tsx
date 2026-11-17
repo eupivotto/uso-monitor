@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { StatusData } from '../hooks/register'
-import { age, BLUE, countdown, DEFAULT_CONFIG, duration, jiraKeyFromBranch, nextAlert, pace, parseJiraKey, resetLabel, statusText } from '../hooks/register'
+import { age, BLUE, citedKey, countdown, DEFAULT_CONFIG, duration, jiraKeyFromBranch, nextAlert, pace, parseJiraKey, pickMine, resetLabel, statusText } from '../hooks/register'
 
 const PANE = {
   plugin: 'uso-monitor',
@@ -294,4 +294,44 @@ test('/uso jira pins a key and fetches it through the Atlassian connector', asyn
   expect(res.text).toContain('https://bsntecnologia.atlassian.net/browse/CARPA-127')
   expect(asked).toContain('getJiraIssue')
   expect(kept['jira-site']).toBe('bsntecnologia.atlassian.net')
+})
+
+test('with no pin, branch or cited key, my open issue being worked on is chosen', () => {
+  const mine = [
+    { key: 'CARPA-126', status: 'Aguardando merge request' },
+    { key: 'CARPA-129', status: 'Desenvolvendo' },
+    { key: 'CARPA-127', status: 'Desenvolvendo' },
+  ]
+  expect(pickMine(mine)?.key).toBe('CARPA-129')
+  expect(pickMine([{ key: 'CARPA-126', status: 'Aguardando merge request' }])?.key).toBe('CARPA-126')
+  expect(pickMine([])).toBe(undefined)
+  const projects = new Set(['CARPA'])
+  expect(citedKey('veja a carpa-127 e depois a CARPA-129', projects)).toBe('CARPA-129')
+  expect(citedKey('arquivo em UTF-8 na porta 8080', projects)).toBe(undefined)
+})
+
+test('the issue shows by itself at start: my most recent open issue being worked on', async ($, on) => {
+  engine(on, [{ kind: 'five_hour', percentUsed: 30, resetsAt: inMs(3_600_000) }])
+  on('mcp.call', (_: unknown, e: any) => {
+    const issue = (key: string, status: string) => ({
+      key,
+      fields: { summary: `Tarefa ${key}`, status: { name: status, statusCategory: { name: 'Em andamento' } }, assignee: { displayName: 'Lucas Pivotto' } },
+    })
+    const body =
+      e.tool === 'getAccessibleAtlassianResources'
+        ? { data: { resources: [{ url: 'https://bsntecnologia.atlassian.net', products: [{ id: 'jira' }] }] } }
+        : e.tool === 'searchJiraIssuesUsingJql'
+          ? { data: { issues: [issue('CARPA-126', 'Aguardando merge request'), issue('CARPA-129', 'Desenvolvendo')] } }
+          : { data: issue(e.args.issueIdOrKey, 'Desenvolvendo') }
+    return { value: { content: [{ type: 'text', text: JSON.stringify(body) }], isError: false } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const res = await $.command.run({
+    command: 'uso',
+    args: 'jira',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 120 },
+  } as Parameters<typeof $.command.run>[0])
+  expect(res.text).toContain('CARPA-129 · Tarefa CARPA-129')
+  expect(res.text).toContain('sua tarefa em andamento mais recente')
 })

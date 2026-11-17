@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
-import type { Config, Info, JiraIssue, Limit, TaskState } from '../types'
+import type { Config, Info, JiraBrief, JiraIssue, Limit, TaskState } from '../types'
 import { BSN_LOGO_PNG } from './logo'
 
 const PANE = 'uso-monitor'
@@ -30,6 +30,9 @@ const tasks = atom({ plugin: 'uso-monitor', key: 'tasks' } as const, {}, { shape
 const config = atom({ plugin: 'uso-monitor', key: 'config' } as const, {}, { shape: 'config-1' })
 const jira = atom({ plugin: 'uso-monitor', key: 'jira' } as const, null, { shape: 'jira-1' })
 const jiraPin = atom({ plugin: 'uso-monitor', key: 'jiraPin' } as const, '', { shape: 'jiraPin-1' })
+const jiraCited = atom({ plugin: 'uso-monitor', key: 'jiraCited' } as const, '', { shape: 'jiraCited-1' })
+const jiraMine = atom({ plugin: 'uso-monitor', key: 'jiraMine' } as const, [], { shape: 'jiraMine-1' })
+const jiraMineAt = atom({ plugin: 'uso-monitor', key: 'jiraMineAt' } as const, 0, { shape: 'jiraMineAt-1' })
 
 const LABELS: Record<string, string> = {
   five_hour: 'Sessão (5h)',
@@ -221,7 +224,7 @@ const CONFIG_HELP: Record<keyof Config, string> = {
   tempo: 'duração da sessão e custo por hora',
   compacto: 'uma linha só enquanto você digita',
   alinhar: 'separadores alinhados em colunas',
-  jira: 'tarefa do Jira do branch ou do /uso jira',
+  jira: 'tarefa do Jira (fixada, do branch, citada no chat ou sua em andamento)',
   logo: 'logo da BSN ao lado das linhas',
 }
 const isConfigKey = (k: string): k is keyof Config => k in DEFAULT_CONFIG
@@ -537,32 +540,106 @@ async function fetchIssue($: EngineInterface, key: string, source: JiraIssue['so
   }
 }
 
-let jiraInflight: string | undefined
-/** Fetches the pinned or branch issue when it changed or is older than 10 min. */
-async function refreshJira($: EngineInterface, force = false) {
+/** Statuses that mean the work sits with someone else: shown after the ones being worked on. */
+const WAITING = /aguard|homolog|review|revis|bloque|blocked|waiting/i
+
+/** My open issue to show: the most recent being worked on, else the most recent at all. */
+export function pickMine(list: JiraBrief[]): JiraBrief | undefined {
+  return list.find(i => !WAITING.test(i.status ?? '')) ?? list[0]
+}
+
+/** A key cited in a prompt, of a project I have open issues in ("CARPA-127"). */
+export function citedKey(text: string, projects: Set<string>): string | undefined {
+  const all = [...text.matchAll(/\b([A-Za-z][A-Za-z0-9]{1,9})-(\d+)\b/g)]
+  for (let n = all.length - 1; n >= 0; n--) {
+    const m = all[n]!
+    const project = m[1]!.toUpperCase()
+    if (projects.has(project)) return `${project}-${m[2]}`
+  }
+  return undefined
+}
+
+const projectsOf = (list: JiraBrief[]) => new Set(list.map(i => i.key.split('-')[0] ?? ''))
+
+let mineInflight: Promise<void> | undefined
+/** My issues in progress, most recently updated first; every 10 min. A fetch under way is shared. */
+async function refreshMine($: EngineInterface, force = false): Promise<void> {
+  if (mineInflight) return mineInflight
+  if (!force && Date.now() - (await read($, jiraMineAt)) < JIRA_TTL_MS) return
+  mineInflight = fetchMine($).finally(() => (mineInflight = undefined))
+  return mineInflight
+}
+
+async function fetchMine($: EngineInterface) {
+  try {
+    const host = await jiraSite($)
+    const r = await $.mcp.call(ATLASSIAN, 'searchJiraIssuesUsingJql', {
+      cloudId: host,
+      jql: 'assignee = currentUser() AND statusCategory = "In Progress" ORDER BY updated DESC',
+      maxResults: 20,
+      fields: ['summary', 'status'],
+    })
+    if (r.isError) return
+    const raw = mcpJson(r) as { data?: { issues?: RawIssue[] }; issues?: RawIssue[] } | undefined
+    const issues = raw?.data?.issues ?? raw?.issues ?? []
+    const list: JiraBrief[] = issues
+      .filter(i => i.key)
+      .map(i => ({ key: i.key!, summary: i.fields?.summary, status: i.fields?.status?.name, category: i.fields?.status?.statusCategory?.name }))
+    await update($, jiraMine, () => list)
+    await update($, jiraMineAt, () => Date.now())
+  } catch {
+    // The connector is out: the pinned, branch or cited key still shows.
+  }
+}
+
+/** Which key to show and why: pinned, branch, cited, then my most recent open issue. */
+async function chooseKey($: EngineInterface): Promise<{ key?: string; source: JiraIssue['source'] }> {
+  const pin = await read($, jiraPin)
+  if (pin) return { key: pin, source: 'manual' }
+  const branchKey = jiraKeyFromBranch((await read($, info)).branch)
+  if (branchKey) return { key: branchKey, source: 'branch' }
+  const cited = await read($, jiraCited)
+  if (cited) return { key: cited, source: 'prompt' }
+  return { key: pickMine(await read($, jiraMine))?.key, source: 'mine' }
+}
+
+let jiraInflight: Promise<void> | undefined
+/** Shows the chosen issue, fetched when it changed or is older than 10 min. One run at a time, shared. */
+async function refreshJira($: EngineInterface, force = false): Promise<void> {
+  while (jiraInflight) await jiraInflight
+  jiraInflight = doRefreshJira($, force).finally(() => (jiraInflight = undefined))
+  return jiraInflight
+}
+
+/** For hooks that do not wait: a failure here never surfaces as a stray rejection. */
+const refreshJiraLater = ($: EngineInterface) => void refreshJira($).catch(() => undefined)
+
+async function doRefreshJira($: EngineInterface, force: boolean) {
   const cfg = { ...DEFAULT_CONFIG, ...(await read($, config)) }
   if (!cfg.jira) return
-  const pin = await read($, jiraPin)
-  const branchKey = jiraKeyFromBranch((await read($, info)).branch)
-  const key = pin || branchKey
-  const source: JiraIssue['source'] = pin ? 'manual' : 'branch'
+  await refreshMine($, force)
+  const { key, source } = await chooseKey($)
   const cur = await read($, jira)
   if (!key) {
     if (cur) await update($, jira, () => null)
     return
   }
-  if (!force && cur?.key === key && cur.fetchedAt && Date.now() - cur.fetchedAt < JIRA_TTL_MS) return
-  if (jiraInflight === key) return
-  jiraInflight = key
-  try {
-    if (cur?.key !== key) await update($, jira, () => ({ key, source, fetchedAt: 0 }))
-    const got = await fetchIssue($, key, source)
-    // A branch name that only looks like a key: show nothing instead of an error.
-    const shown = got.error && source === 'branch' && got.error.startsWith('não encontrada') ? null : got
-    if ((await read($, jiraPin)) || jiraKeyFromBranch((await read($, info)).branch)) await update($, jira, () => shown)
-  } finally {
-    jiraInflight = undefined
+  if (!force && cur?.key === key && cur.fetchedAt && Date.now() - cur.fetchedAt < JIRA_TTL_MS) {
+    if (cur.source !== source) await update($, jira, () => ({ ...cur, source }))
+    return
   }
+  if (cur?.key !== key) await update($, jira, () => ({ key, source, fetchedAt: 0 }))
+  const got = await fetchIssue($, key, source)
+  // A branch name that only looks like a key: show nothing instead of an error.
+  const shown = got.error && source === 'branch' && got.error.startsWith('não encontrada') ? null : got
+  if ((await chooseKey($)).key === key) await update($, jira, () => shown)
+}
+
+const SOURCE_LABEL: Record<JiraIssue['source'], string> = {
+  manual: 'fixada com /uso jira (nesta pasta)',
+  branch: 'nome do branch',
+  prompt: 'citada no chat',
+  mine: 'sua tarefa em andamento mais recente',
 }
 
 async function pinsByRoot($: EngineInterface): Promise<Record<string, string>> {
@@ -579,7 +656,7 @@ async function jiraCommand($: EngineInterface, arg: string | undefined): Promise
     delete pins[root]
     await $.store.set(STORE_JIRA_PINS, pins)
     await refreshJira($, true)
-    return 'Tarefa fixada removida. Volta a valer a chave do branch, se houver.'
+    return 'Tarefa fixada removida. Volta a escolha automática: branch, chave citada no chat ou sua tarefa em andamento.'
   }
   if (arg && arg !== 'atualizar') {
     const key = parseJiraKey(arg)
@@ -589,12 +666,12 @@ async function jiraCommand($: EngineInterface, arg: string | undefined): Promise
   }
   await refreshJira($, true)
   const j = await read($, jira)
-  if (!j) return 'Nenhuma tarefa do Jira: o branch não tem chave. Fixe uma com /uso jira CARPA-127.'
+  if (!j) return 'Nenhuma tarefa do Jira em andamento encontrada. Fixe uma com /uso jira CARPA-127.'
   if (j.error) return `${j.key}: ${j.error}.`
   return [
     `${j.key} · ${j.summary ?? ''}`,
     `Status: ${j.status ?? '–'}   Responsável: ${j.assignee ?? '–'}   Prioridade: ${j.priority ?? '–'}`,
-    `Origem: ${j.source === 'manual' ? 'fixada com /uso jira (nesta pasta)' : 'nome do branch'}`,
+    `Origem: ${SOURCE_LABEL[j.source]}`,
     j.url ?? '',
   ].join('\n')
 }
@@ -641,18 +718,32 @@ export const register: Register = on => {
     await readInfo($, usage)
     const pin = (await pinsByRoot($))[(await $.session.root().catch(() => undefined)) ?? '']
     if (pin) await update($, jiraPin, () => pin)
-    void refreshJira($)
+    refreshJiraLater($)
     await refreshAgents($)
     await update($, now, () => Date.now())
     // Countdowns, pace, duration and live agents redraw every 15 s.
     $.clock.every(15_000, async () => {
       await update($, now, () => Date.now())
       await refreshAgents($)
+      refreshJiraLater($)
     })
 
     // Lives under the prompt (PromptHint); the full pane opens only with /uso.
     $.ui.status(undefined)
     return started
+  })
+
+  // A key of one of my projects cited in a prompt becomes the issue shown.
+  on('prompt.submit', async ($, e, next) => {
+    const cfg = { ...DEFAULT_CONFIG, ...(await read($, config)) }
+    if (cfg.jira && !e.command) {
+      const key = citedKey(e.text, projectsOf(await read($, jiraMine)))
+      if (key && key !== (await read($, jiraCited))) {
+        await update($, jiraCited, () => key)
+        refreshJiraLater($)
+      }
+    }
+    return next(e)
   })
 
   on('command.run', { command: 'uso' }, async ($, e) => {
@@ -675,7 +766,7 @@ export const register: Register = on => {
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('rateLimits')) await takeReading($, e.rateLimits)
     await readInfo($, e)
-    void refreshJira($)
+    refreshJiraLater($)
     await update($, now, () => Date.now())
     return next(e)
   })
@@ -768,6 +859,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Link } = $.ui.resolve(e)
     const issue = await read($, jira)
+    const mine = await read($, jiraMine)
     const list = sortLimits(await read($, limits))
     const at = await read($, readAt)
     const saved = await read($, isSaved)
@@ -853,7 +945,7 @@ export const register: Register = on => {
             <Text>
               <Text dimColor>{`${ICON.jira} `}</Text>
               <Text weight="bold" color={BLUE.accent}>{issue.key}</Text>
-              <Text dimColor>{issue.source === 'manual' ? '  (fixada)' : '  (do branch)'}</Text>
+              <Text dimColor>{`  (${{ manual: 'fixada', branch: 'do branch', prompt: 'citada no chat', mine: 'em andamento' }[issue.source]})`}</Text>
             </Text>
             {issue.error ? (
               <Text dimColor>{issue.error}</Text>
@@ -868,6 +960,20 @@ export const register: Register = on => {
                 {issue.url && <Link href={issue.url} label="abrir no Jira" />}
               </Box>
             )}
+          </Box>
+        )}
+
+        {mine.length > 0 && (
+          <Box flexDirection="column">
+            <Text dimColor>{`Minhas em andamento (${mine.length})`}</Text>
+            {mine.slice(0, 8).map(m => (
+              <Text wrap="truncate-end">
+                <Text color={m.key === issue?.key ? BLUE.accent : undefined} weight={m.key === issue?.key ? 'bold' : undefined}>{m.key}</Text>
+                <Text dimColor>{` ${m.status ?? ''} · `}</Text>
+                {m.summary ?? ''}
+              </Text>
+            ))}
+            <Text dimColor>Fixe outra com /uso jira CHAVE</Text>
           </Box>
         )}
       </Box>

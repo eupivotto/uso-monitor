@@ -27,9 +27,12 @@ export type JiraIssue = {
   fetchedAt: number
   /** Why the last fetch failed, when it did. */
   error?: string
-  /** Where the key came from. */
-  source: 'branch' | 'manual'
+  /** Where the key came from: pinned, branch, cited in a prompt, or my most recent open issue. */
+  source: 'branch' | 'manual' | 'prompt' | 'mine'
 }
+
+/** One of my open issues, for the pane's list. */
+export type JiraBrief = { key: string; summary?: string; status?: string; category?: string }
 
 /** A task's state as the model last set it. */
 export type TaskState = 'pending' | 'in_progress' | 'completed'
@@ -77,6 +80,12 @@ declare module 'claude-code' {
       jira: Shaped<JiraIssue | null>
       /** A key pinned with /uso jira; '' when none (the branch decides). */
       jiraPin: Shaped<string>
+      /** The last key of one of my projects cited in a prompt; '' when none. */
+      jiraCited: Shaped<string>
+      /** My issues in progress, the one to show first. */
+      jiraMine: Shaped<JiraBrief[]>
+      /** When `jiraMine` was fetched (ms); 0 when never. */
+      jiraMineAt: Shaped<number>
     }
   }
 }

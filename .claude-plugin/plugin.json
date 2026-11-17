@@ -1,6 +1,6 @@
 {
   "name": "uso-monitor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Uso da sessão (5h) e da semana sob o prompt, com previsão de ritmo, contexto, agentes, tarefas e custo, tarefa do Jira e logo da BSN, em tons de azul",
   "types": "./types/index.d.ts"
 }
