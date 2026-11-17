@@ -13,6 +13,24 @@ export type Info = {
   modified?: number
 }
 
+/** The Jira issue tied to this session, as last fetched. */
+export type JiraIssue = {
+  key: string
+  summary?: string
+  status?: string
+  /** Jira's status category: "Itens Pendentes", "Em andamento", "Concluído"... */
+  category?: string
+  assignee?: string
+  priority?: string
+  url?: string
+  /** When it was fetched (ms); 0 while loading. */
+  fetchedAt: number
+  /** Why the last fetch failed, when it did. */
+  error?: string
+  /** Where the key came from. */
+  source: 'branch' | 'manual'
+}
+
 /** A task's state as the model last set it. */
 export type TaskState = 'pending' | 'in_progress' | 'completed'
 
@@ -30,6 +48,10 @@ export type Config = {
   compacto: boolean
   /** Separators aligned in shared columns. */
   alinhar: boolean
+  /** The Jira issue of the branch or of /uso jira. */
+  jira: boolean
+  /** The small BSN logo beside the lines. */
+  logo: boolean
 }
 
 declare module 'claude-code' {
@@ -51,6 +73,10 @@ declare module 'claude-code' {
       tasks: Shaped<Record<string, TaskState>>
       /** The person's toggles; missing keys take the defaults. */
       config: Shaped<Partial<Config>>
+      /** The issue shown; null when none. */
+      jira: Shaped<JiraIssue | null>
+      /** A key pinned with /uso jira; '' when none (the branch decides). */
+      jiraPin: Shaped<string>
     }
   }
 }

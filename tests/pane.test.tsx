@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { StatusData } from '../hooks/register'
-import { age, BLUE, countdown, DEFAULT_CONFIG, duration, nextAlert, pace, resetLabel, statusText } from '../hooks/register'
+import { age, BLUE, countdown, DEFAULT_CONFIG, duration, jiraKeyFromBranch, nextAlert, pace, parseJiraKey, resetLabel, statusText } from '../hooks/register'
 
 const PANE = {
   plugin: 'uso-monitor',
@@ -177,6 +177,9 @@ test('under the prompt: blue text, bars colored by state, engine hint kept', asy
   expect(colorOf('medium')).toBe(BLUE.value)
   expect(colorOf(' 42%')).toBe('#4CC38A')
   expect(colorOf(' 95%')).toBe('#EF5F5F')
+  const logo = await ui.findAll({ type: 'Image' })
+  expect(logo.length).toBe(1)
+  expect(logo[0]?.props.alt).toBe('BSN')
   await ui.unmount()
 })
 
@@ -224,4 +227,71 @@ test('/uso config lists the toggles, turns one off and keeps it', async ($, on) 
 
   const bad = await uso('config cor azul')
   expect(bad.text).toContain('Não entendi')
+})
+
+test('a Jira key is read from the branch name and from what is typed', () => {
+  expect(jiraKeyFromBranch('feature/CARPA-127-esteira')).toBe('CARPA-127')
+  expect(jiraKeyFromBranch('carpa-127')).toBe('CARPA-127')
+  expect(jiraKeyFromBranch('bugfix/KOI_42_login')).toBe(undefined)
+  expect(jiraKeyFromBranch('bugfix/KOI-42_login')).toBe('KOI-42')
+  expect(jiraKeyFromBranch('main')).toBe(undefined)
+  expect(jiraKeyFromBranch(undefined)).toBe(undefined)
+  expect(parseJiraKey('carpa-127')).toBe('CARPA-127')
+  expect(parseJiraKey('https://bsntecnologia.atlassian.net/browse/CARPA-127')).toBe('CARPA-127')
+  expect(parseJiraKey('qualquer')).toBe(undefined)
+})
+
+test('the Jira line shows key, title, status and assignee, and hides when off', () => {
+  const jira = {
+    key: 'CARPA-127',
+    summary: 'Criar Protótipo da Esteira de Cadastros',
+    status: 'Desenvolvendo',
+    category: 'Em andamento',
+    assignee: 'Lucas Pivotto',
+    priority: 'Média',
+    fetchedAt: BASE,
+    source: 'branch' as const,
+  }
+  const text = statusText(sample({ jira }))
+  expect(text).toContain('◉ CARPA-127 Criar Protótipo da Esteira de Cadastros')
+  expect(text).toContain('Desenvolvendo')
+  expect(text).toContain('Lucas Pivotto · Média')
+  expect(statusText(sample({ jira, config: { ...DEFAULT_CONFIG, jira: false } }))).not.toContain('CARPA-127')
+  expect(statusText(sample({ jira: { key: 'CARPA-9', fetchedAt: 0, source: 'manual' } }))).toContain('CARPA-9 carregando…')
+})
+
+test('/uso jira pins a key and fetches it through the Atlassian connector', async ($, on) => {
+  const kept: Record<string, unknown> = {}
+  engine(on, [{ kind: 'five_hour', percentUsed: 30, resetsAt: inMs(3_600_000) }], undefined, kept)
+  const asked: string[] = []
+  on('mcp.call', (_: unknown, e: any) => {
+    asked.push(e.tool)
+    const body =
+      e.tool === 'getAccessibleAtlassianResources'
+        ? { data: { resources: [{ url: 'https://bsntecnologia.atlassian.net', products: [{ id: 'jira' }] }] } }
+        : {
+            data: {
+              key: e.args.issueIdOrKey,
+              fields: {
+                summary: 'Criar Protótipo',
+                status: { name: 'Desenvolvendo', statusCategory: { name: 'Em andamento' } },
+                assignee: { displayName: 'Lucas Pivotto' },
+                priority: { name: 'Média' },
+              },
+            },
+          }
+    return { value: { content: [{ type: 'text', text: JSON.stringify(body) }], isError: false } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const res = await $.command.run({
+    command: 'uso',
+    args: 'jira carpa-127',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 120 },
+  } as Parameters<typeof $.command.run>[0])
+  expect(res.text).toContain('CARPA-127 · Criar Protótipo')
+  expect(res.text).toContain('Responsável: Lucas Pivotto')
+  expect(res.text).toContain('https://bsntecnologia.atlassian.net/browse/CARPA-127')
+  expect(asked).toContain('getJiraIssue')
+  expect(kept['jira-site']).toBe('bsntecnologia.atlassian.net')
 })

@@ -17,6 +17,15 @@ Mod para o Claude Code que mostra, logo abaixo da caixa de digitação, o uso da
 - Avisos em 80% e 90% de uso
 - `/uso` abre o painel completo; `/uso config` liga e desliga cada item
 
+## Jira e logo (0.4.0)
+
+- **Tarefa do Jira:** a chave sai do nome do branch (`feature/CARPA-127-esteira` → `CARPA-127`) ou é fixada com
+  `/uso jira CARPA-127` (vale para a pasta e fica salva). A linha mostra chave, título, status, responsável e
+  prioridade; o painel `/uso` traz o link. Usa o plugin `atlassian` já conectado no Claude Code, sem token próprio.
+  Atualiza a cada 10 min; `/uso jira atualizar` força, `/uso jira off` desfixa, `/uso config jira off` esconde.
+- **Logo da BSN:** pequena (10 colunas × 1 linha) ao lado das linhas. Só aparece em terminal com suporte a imagem
+  (Kitty, WezTerm, Ghostty, iTerm2); nos demais fica o texto `BSN` em verde-limão. `/uso config logo off` esconde.
+
 ## Instalar
 
 No prompt de uma sessão do Claude Code no terminal:

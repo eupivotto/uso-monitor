@@ -1,13 +1,21 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
-import type { Config, Info, Limit, TaskState } from '../types'
+import type { Config, Info, JiraIssue, Limit, TaskState } from '../types'
+import { BSN_LOGO_PNG } from './logo'
 
 const PANE = 'uso-monitor'
 const TITLE = 'Uso'
 const STORE_LAST = 'last-reading'
 const STORE_ALERTS = 'alerts'
 const STORE_CONFIG = 'config'
+const STORE_JIRA_SITE = 'jira-site'
+const STORE_JIRA_PINS = 'jira-pins'
+const ATLASSIAN = 'plugin:atlassian:atlassian'
+const JIRA_TTL_MS = 10 * 60_000
+/** BSN lime, for the logo's text stand-in. */
+const BSN_LIME = '#D0D600'
+const LOGO_COLS = 10
 const ALERT_AT = [80, 90]
 
 // Change a tag when the stored value's fields change: an older value is then declined.
@@ -20,6 +28,8 @@ const startedAt = atom({ plugin: 'uso-monitor', key: 'startedAt' } as const, 0, 
 const agents = atom({ plugin: 'uso-monitor', key: 'agents' } as const, 0, { shape: 'agents-1' })
 const tasks = atom({ plugin: 'uso-monitor', key: 'tasks' } as const, {}, { shape: 'tasks-1' })
 const config = atom({ plugin: 'uso-monitor', key: 'config' } as const, {}, { shape: 'config-1' })
+const jira = atom({ plugin: 'uso-monitor', key: 'jira' } as const, null, { shape: 'jira-1' })
+const jiraPin = atom({ plugin: 'uso-monitor', key: 'jiraPin' } as const, '', { shape: 'jiraPin-1' })
 
 const LABELS: Record<string, string> = {
   five_hour: 'Sessão (5h)',
@@ -49,6 +59,7 @@ const ICON = {
   time: '◴',
   agent: '⚙',
   task: '☐',
+  jira: '◉',
 } as const
 const ORDER = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'spend_limit']
 const WEEKDAYS = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb']
@@ -200,6 +211,8 @@ export const DEFAULT_CONFIG: Config = {
   tempo: true,
   compacto: true,
   alinhar: true,
+  jira: true,
+  logo: true,
 }
 const CONFIG_HELP: Record<keyof Config, string> = {
   ritmo: 'previsão de quando o limite acaba no ritmo atual',
@@ -208,6 +221,8 @@ const CONFIG_HELP: Record<keyof Config, string> = {
   tempo: 'duração da sessão e custo por hora',
   compacto: 'uma linha só enquanto você digita',
   alinhar: 'separadores alinhados em colunas',
+  jira: 'tarefa do Jira do branch ou do /uso jira',
+  logo: 'logo da BSN ao lado das linhas',
 }
 const isConfigKey = (k: string): k is keyof Config => k in DEFAULT_CONFIG
 
@@ -266,6 +281,7 @@ export type StatusData = {
   agents: number
   tasks: Record<string, TaskState>
   config: Config
+  jira?: JiraIssue | null
 }
 
 function usageGroups(d: StatusData, barWidth: number, withPace: boolean): Group[] {
@@ -341,7 +357,29 @@ export function fullLines(d: StatusData): Line[] {
   ]
   const activity = activityGroups(d)
   if (activity.length > 0) lines.push({ groups: activity, align: true })
+  const issue = jiraGroups(d)
+  if (issue.length > 0) lines.push({ groups: issue, align: false })
   return lines
+}
+
+const clip = (text: string, max: number) => ([...text].length > max ? `${[...text].slice(0, max - 1).join('')}…` : text)
+
+/** Green when done, accent while in progress, quiet otherwise. */
+const jiraStatusColor = (category?: string) =>
+  /conclu|done/i.test(category ?? '') ? STATE.success : /andamento|progress/i.test(category ?? '') ? BLUE.accent : BLUE.label
+
+/** The Jira line: key, title, status, assignee, priority. */
+export function jiraGroups(d: StatusData): Group[] {
+  const j = d.jira
+  if (!d.config.jira || !j) return []
+  const head: Group = [ico(ICON.jira), { text: j.key, color: BLUE.accent, bold: true }]
+  if (j.error) return [[...head, { text: ` ${j.error}`, color: BLUE.icon }]]
+  if (!j.fetchedAt) return [[...head, { text: ' carregando…', color: BLUE.icon }]]
+  const groups: Group[] = [[...head, ...(j.summary ? [{ text: ` ${clip(j.summary, 60)}`, color: BLUE.value }] : [])]]
+  if (j.status) groups.push([{ text: j.status, color: jiraStatusColor(j.category), bold: true }])
+  const who = [j.assignee, j.priority].filter(Boolean).join(' · ')
+  if (who) groups.push([{ text: who, color: BLUE.label }])
+  return groups
 }
 
 function activityGroups(d: StatusData): Group[] {
@@ -370,6 +408,7 @@ export function compactLine(d: StatusData): Line {
     ...usageGroups(d, 5, false),
     [ico(ICON.cost), { text: `$${(d.i.costUsd ?? 0).toFixed(2)}`, color: BLUE.value }],
     ...activityGroups(d),
+    ...(d.config.jira && d.jira ? [[ico(ICON.jira), { text: d.jira.key, color: BLUE.accent, bold: true }]] : []),
   ]
   return { groups, align: false }
 }
@@ -410,7 +449,7 @@ export const statusText = (d: StatusData, opts?: { columns?: number; isDraft?: b
   plain(statusSegs(d, opts)).join('\n')
 
 async function statusData($: EngineInterface): Promise<StatusData> {
-  const [list, i, saved, nowMs, start, agentCount, taskMap, cfg] = await Promise.all([
+  const [list, i, saved, nowMs, start, agentCount, taskMap, cfg, issue] = await Promise.all([
     read($, limits),
     read($, info),
     read($, isSaved),
@@ -419,6 +458,7 @@ async function statusData($: EngineInterface): Promise<StatusData> {
     read($, agents),
     read($, tasks),
     read($, config),
+    read($, jira),
   ])
   return {
     list,
@@ -429,7 +469,134 @@ async function statusData($: EngineInterface): Promise<StatusData> {
     agents: agentCount,
     tasks: taskMap,
     config: { ...DEFAULT_CONFIG, ...cfg },
+    jira: issue,
   }
+}
+
+/** A Jira key in a branch name: "feature/CARPA-127-esteira" gives "CARPA-127". */
+export function jiraKeyFromBranch(branch?: string): string | undefined {
+  const m = branch?.match(/(?:^|[\/_])([A-Za-z][A-Za-z0-9]{1,9}-\d+)(?=$|[-_/.])/)
+  return m?.[1]?.toUpperCase()
+}
+
+/** A key as typed: "carpa-127" or a /browse/ URL. */
+export function parseJiraKey(text: string): string | undefined {
+  const m = text.match(/([A-Za-z][A-Za-z0-9]{1,9}-\d+)\s*$/)
+  return m?.[1]?.toUpperCase()
+}
+
+const mcpJson = (r: { content: { type: string; text?: string }[] }): unknown => {
+  const text = r.content.find(b => b.type === 'text')?.text
+  return text ? JSON.parse(text) : undefined
+}
+
+/** The Jira site's host (bsntecnologia.atlassian.net), asked once and kept. */
+async function jiraSite($: EngineInterface): Promise<string> {
+  const kept = await $.store.get(STORE_JIRA_SITE)
+  if (typeof kept === 'string' && kept) return kept
+  const r = await $.mcp.call(ATLASSIAN, 'getAccessibleAtlassianResources', {})
+  const data = mcpJson(r) as { data?: { resources?: { url: string; products?: { id: string }[] }[] } } | undefined
+  const res = data?.data?.resources?.find(x => x.products?.some(p => p.id === 'jira')) ?? data?.data?.resources?.[0]
+  if (!res) throw new Error('nenhum site Jira')
+  const host = new URL(res.url).host
+  await $.store.set(STORE_JIRA_SITE, host)
+  return host
+}
+
+type RawIssue = {
+  key?: string
+  fields?: {
+    summary?: string
+    status?: { name?: string; statusCategory?: { name?: string } }
+    assignee?: { displayName?: string } | null
+    priority?: { name?: string } | null
+  }
+}
+
+async function fetchIssue($: EngineInterface, key: string, source: JiraIssue['source']): Promise<JiraIssue> {
+  try {
+    const host = await jiraSite($)
+    const r = await $.mcp.call(ATLASSIAN, 'getJiraIssue', { cloudId: host, issueIdOrKey: key })
+    if (r.isError) return { key, source, fetchedAt: Date.now(), error: 'não encontrada no Jira' }
+    const raw = mcpJson(r) as { data?: RawIssue } & RawIssue
+    const it = raw.data ?? raw
+    const f = it.fields ?? {}
+    return {
+      key: it.key ?? key,
+      source,
+      fetchedAt: Date.now(),
+      summary: f.summary,
+      status: f.status?.name,
+      category: f.status?.statusCategory?.name,
+      assignee: f.assignee?.displayName ?? 'sem responsável',
+      priority: f.priority?.name,
+      url: `https://${host}/browse/${it.key ?? key}`,
+    }
+  } catch {
+    return { key, source, fetchedAt: Date.now(), error: 'conector Atlassian indisponível' }
+  }
+}
+
+let jiraInflight: string | undefined
+/** Fetches the pinned or branch issue when it changed or is older than 10 min. */
+async function refreshJira($: EngineInterface, force = false) {
+  const cfg = { ...DEFAULT_CONFIG, ...(await read($, config)) }
+  if (!cfg.jira) return
+  const pin = await read($, jiraPin)
+  const branchKey = jiraKeyFromBranch((await read($, info)).branch)
+  const key = pin || branchKey
+  const source: JiraIssue['source'] = pin ? 'manual' : 'branch'
+  const cur = await read($, jira)
+  if (!key) {
+    if (cur) await update($, jira, () => null)
+    return
+  }
+  if (!force && cur?.key === key && cur.fetchedAt && Date.now() - cur.fetchedAt < JIRA_TTL_MS) return
+  if (jiraInflight === key) return
+  jiraInflight = key
+  try {
+    if (cur?.key !== key) await update($, jira, () => ({ key, source, fetchedAt: 0 }))
+    const got = await fetchIssue($, key, source)
+    // A branch name that only looks like a key: show nothing instead of an error.
+    const shown = got.error && source === 'branch' && got.error.startsWith('não encontrada') ? null : got
+    if ((await read($, jiraPin)) || jiraKeyFromBranch((await read($, info)).branch)) await update($, jira, () => shown)
+  } finally {
+    jiraInflight = undefined
+  }
+}
+
+async function pinsByRoot($: EngineInterface): Promise<Record<string, string>> {
+  const v = await $.store.get(STORE_JIRA_PINS)
+  return typeof v === 'object' && v !== null ? { ...(v as Record<string, string>) } : {}
+}
+
+/** `/uso jira [KEY|off|atualizar]`. */
+async function jiraCommand($: EngineInterface, arg: string | undefined): Promise<string> {
+  const root = (await $.session.root().catch(() => undefined)) ?? ''
+  if (arg === 'off' || arg === 'limpar') {
+    await update($, jiraPin, () => '')
+    const pins = await pinsByRoot($)
+    delete pins[root]
+    await $.store.set(STORE_JIRA_PINS, pins)
+    await refreshJira($, true)
+    return 'Tarefa fixada removida. Volta a valer a chave do branch, se houver.'
+  }
+  if (arg && arg !== 'atualizar') {
+    const key = parseJiraKey(arg)
+    if (!key) return `"${arg}" não parece uma chave do Jira (ex.: CARPA-127).`
+    await update($, jiraPin, () => key)
+    await $.store.set(STORE_JIRA_PINS, { ...(await pinsByRoot($)), [root]: key })
+  }
+  await refreshJira($, true)
+  const j = await read($, jira)
+  if (!j) return 'Nenhuma tarefa do Jira: o branch não tem chave. Fixe uma com /uso jira CARPA-127.'
+  if (j.error) return `${j.key}: ${j.error}.`
+  return [
+    `${j.key} · ${j.summary ?? ''}`,
+    `Status: ${j.status ?? '–'}   Responsável: ${j.assignee ?? '–'}   Prioridade: ${j.priority ?? '–'}`,
+    `Origem: ${j.source === 'manual' ? 'fixada com /uso jira (nesta pasta)' : 'nome do branch'}`,
+    j.url ?? '',
+  ].join('\n')
 }
 
 const LIVE_AGENT = new Set(['pending', 'running', 'waiting'])
@@ -452,7 +619,7 @@ export const register: Register = on => {
     const started = await next(e)
     await $.command.register({
       name: 'uso',
-      description: 'Painel de uso; /uso config liga e desliga itens da linha sob o prompt',
+      description: 'Painel de uso; /uso config liga e desliga itens; /uso jira CHAVE fixa a tarefa do Jira',
     })
 
     const storedCfg = await $.store.get(STORE_CONFIG)
@@ -472,6 +639,9 @@ export const register: Register = on => {
       }
     }
     await readInfo($, usage)
+    const pin = (await pinsByRoot($))[(await $.session.root().catch(() => undefined)) ?? '']
+    if (pin) await update($, jiraPin, () => pin)
+    void refreshJira($)
     await refreshAgents($)
     await update($, now, () => Date.now())
     // Countdowns, pace, duration and live agents redraw every 15 s.
@@ -487,6 +657,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'uso' }, async ($, e) => {
     const [sub, key, value] = e.args.trim().split(/\s+/)
+    if (sub === 'jira') return { text: await jiraCommand($, key) }
     if (sub === 'config') {
       const cfg = { ...DEFAULT_CONFIG, ...(await read($, config)) }
       if (key === undefined) return { text: configReport(cfg) }
@@ -504,6 +675,7 @@ export const register: Register = on => {
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('rateLimits')) await takeReading($, e.rateLimits)
     await readInfo($, e)
+    void refreshJira($)
     await update($, now, () => Date.now())
     return next(e)
   })
@@ -550,13 +722,18 @@ export const register: Register = on => {
 
   // Under the prompt: the engine's hint line, then the colored lines.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const els = $.ui.resolve(e)
+    const { Box, Text } = els
     const d = await statusData($)
     const hint = await next(e)
-    const lines = statusSegs(d, { columns: e.viewport?.columns, isDraft: e.props.isDraft })
-    return (
+    const withLogo = d.config.logo
+    const cols = e.viewport?.columns
+    const lines = statusSegs(d, {
+      columns: cols === undefined ? undefined : withLogo ? cols - LOGO_COLS - 2 : cols,
+      isDraft: e.props.isDraft,
+    })
+    const body = (
       <Box flexDirection="column">
-        {hint}
         {lines.map(line => (
           <Text wrap="truncate-end">
             {line.map(seg => (
@@ -566,10 +743,31 @@ export const register: Register = on => {
         ))}
       </Box>
     )
+    // The picture only where the surface draws images (the terminal); elsewhere, "BSN" in lime.
+    const Image = 'Image' in els ? els.Image : undefined
+    const logo = Image ? (
+      <Image key="bsn-logo" source={{ png: BSN_LOGO_PNG }} columns={LOGO_COLS} rows={1} alt="BSN" />
+    ) : (
+      <Text color={BSN_LIME} weight="bold">BSN</Text>
+    )
+    return (
+      <Box flexDirection="column">
+        {hint}
+        {withLogo ? (
+          <Box flexDirection="row" gap={2}>
+            {logo}
+            {body}
+          </Box>
+        ) : (
+          body
+        )}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Link } = $.ui.resolve(e)
+    const issue = await read($, jira)
     const list = sortLimits(await read($, limits))
     const at = await read($, readAt)
     const saved = await read($, isSaved)
@@ -649,6 +847,29 @@ export const register: Register = on => {
           {row(ICON.dir, 'Pasta', i.dir)}
           {row(ICON.git, 'Git', gitValue ?? 'sem repositório')}
         </Box>
+
+        {issue && (
+          <Box flexDirection="column">
+            <Text>
+              <Text dimColor>{`${ICON.jira} `}</Text>
+              <Text weight="bold" color={BLUE.accent}>{issue.key}</Text>
+              <Text dimColor>{issue.source === 'manual' ? '  (fixada)' : '  (do branch)'}</Text>
+            </Text>
+            {issue.error ? (
+              <Text dimColor>{issue.error}</Text>
+            ) : !issue.fetchedAt ? (
+              <Text dimColor>carregando…</Text>
+            ) : (
+              <Box flexDirection="column">
+                <Text wrap="wrap">{issue.summary ?? ''}</Text>
+                {row('·', 'Status', issue.status, jiraStatusColor(issue.category))}
+                {row('·', 'Responsável', issue.assignee)}
+                {row('·', 'Prioridade', issue.priority)}
+                {issue.url && <Link href={issue.url} label="abrir no Jira" />}
+              </Box>
+            )}
+          </Box>
+        )}
       </Box>
     )
   })
